@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Polkadot Staking Troubleshooting</title>
+    <style>
+        body {
+            margin: 10px;
+            padding: 0;
+            font-family: 'Inter', sans-serif;
+            font-size: 16px;
+            font-weight: 400;
+        }
+        .error {
+            color: red;
+            font-weight: bold;
+        }
+        .success {
+            color: #0ADD08;
+            font-weight:bold;
+        }
+        .issue {
+            color: orange;
+            font-weight: bold;
+        }
+        .info-container {
+            margin: 10px 0;
+        }
+        table {
+            border-collapse: collapse;
+            width: 44%;
+            font-family: 'Inter', sans-serif;
+            font-size: 16px;
+            font-weight: 400;
+            border-radius: 3px;
+            overflow: hidden;
+        }
+        th, td {
+            border: 2px solid black; 
+            padding: 8px;
+            text-align: left;
+        }
+        .hidden {
+            display: none;
+        }
+        input[type="text"],
+        button {
+            border-radius: 8px;
+            padding: 10px 20px;
+            border: 1px solid black;
+            cursor: pointer;
+            transition: background-color 0.2s, color 0.2s;
+        }
+        button {
+            background-color: black;
+            color: white;
+        }
+        button:hover {
+            background-color: #333;
+        }
+    </style>
+</head>
+<body>
+    <div class="info-container">
+        <h1>Polkadot Staking Troubleshooting</h1>
+        <label for="address">Enter Address:</label>
+        <input type="text" id="address" placeholder="Polkadot address here">
+        <button id="fetchInfo">Run</button>
+    </div>
+
+    <div class="info-container">
+        <table id="balanceTable" class="hidden">
+            <tr><th>Account Info</th></tr>
+        </table>
+    </div>
+
+    <div class="info-container">
+        <button id="toggleNominations" class="hidden" disabled>Show Validator Info</button>
+        <h2 id="nominationsTitle" class="hidden"></h2>
+        <table id="nominationsTable" class="hidden">
+        </table>
+    </div>
+
+    <script type="module">
+    import { ApiPromise, WsProvider } from 'https://cdn.jsdelivr.net/npm/@polkadot/api@10.9.1/+esm'
+    async function main() {
+        const balanceTable = document.getElementById("balanceTable");
+        const nominationsTitle = document.getElementById("nominationsTitle");
+        const nominationsTable = document.getElementById("nominationsTable");
+        const toggleNominationsButton = document.getElementById("toggleNominations");
+        const addressInput = document.getElementById("address");
+        const fetchButton = document.getElementById("fetchInfo");
+        const errorClass = document.getElementById("error");
+
+        const provider = new WsProvider('wss://rpc.polkadot.io');
+        const api = await ApiPromise.create({ provider });
+        const bn = 0.00000000010;
+        const commissionMath = 0.00000010;
+        let hasBalance;
+        let isStaking;
+        let activeBond;
+        let minBondForRewards = (await api.query.staking.minimumActiveStake()).toString() * bn;
+
+        fetchButton.addEventListener("click", async () => {
+            const addr = addressInput.value.trim();
+            if (addr) {
+                balanceTable.classList.remove("hidden");
+                nominationsTitle.classList.remove("hidden");
+                toggleNominationsButton.classList.remove("hidden");
+                toggleNominationsButton.disabled = true; 
+                balanceTable.innerHTML = "<tr><th>Account Info</th></tr>"; 
+                nominationsTable.innerHTML = "<tr><th></th><th>Validator Address</th><th>Commission</th></tr>"; 
+                await processAddress(addr);
+            }
+        });
+
+        toggleNominationsButton.addEventListener("click", () => {
+            nominationsTable.classList.toggle("hidden");
+        });
+
+        async function processAddress(addr) {
+            let bondTooLow = false;
+            async function checkBalance() {
+                try {
+                    const { nonce, data: balance } = await api.query.system.account(addr);
+                    if (balance.free > 0) {
+                        hasBalance = true;
+                        balanceTable.innerHTML += `<tr><td>Total balance: ${formatNumber(balance.free * bn)}</td></tr>`;
+                        if (balance.frozen > 0) {
+                            isStaking = true;
+                            balanceTable.innerHTML += `<tr><td>Staked balance: ${formatNumber(balance.frozen * bn)}</td></tr>`;
+                            balanceTable.innerHTML += `<tr><td>Unstaked balance: ${formatNumber(balance.free * bn - balance.frozen * bn)}</td></tr>`;
+                            activeBond = balance.frozen * bn;
+                            if (activeBond < minBondForRewards) {
+                                balanceTable.innerHTML += `<tr><td class="error" id="error">It is suggested to have the staking threshold (${formatNumber(minBondForRewards)}) + 20 to earn rewards</td></tr>`;
+                                balanceTable.innerHTML += `<tr><td class="error" id="error">Try staking at least ${formatNumber((minBondForRewards + 20) - activeBond)} more DOT to earn rewards</td></tr>`;
+                                bondTooLow = true;
+                            }
+                        } else {
+                            isStaking = false;
+                            balanceTable.innerHTML += `<tr class="error" id="error"><td colspan="3">Account not staking</td></tr>`;
+                        }
+                    } else {
+                        hasBalance = false;
+                        balanceTable.innerHTML += `<tr class="error" id="error"><td  colspan="3">Account has no balance</td></tr>`;
+                    }
+                } catch(err) {
+                    console.error(err);
+                }
+            }
+
+            async function checkNominations() {
+                let highCommission = false;
+                let numOfHighCommission = 0;
+                let allMaxCommission = false;
+                let someMaxCommission = false;
+                let isHighCommission = false;
+                let shouldGetRewards = false;
+                let maxNoms = true;
+                try {
+                    const nominators = JSON.parse(await api.query.staking.nominators(addr));
+                    for (let i = 0; i < nominators.targets.length; i++) {
+                        let commission = JSON.parse(await api.query.staking.validators(nominators.targets[i]));
+                        nominationsTable.innerHTML += `<tr><td>${i + 1}</td><td>${nominators.targets[i]}</td><td>${formatNumber(commission.commission * commissionMath)}%</td></tr>`;
+                        if(formatNumber(commission.commission * commissionMath) == 100) {
+                            numOfHighCommission++
+                            isHighCommission = true
+                        }
+
+                    }
+                    if(numOfHighCommission == nominators.targets.length && !allMaxCommission) {
+                        if(isHighCommission) {
+                            allMaxCommission = true;
+                            balanceTable.innerHTML += `<tr class="error" id="error"><td colspan="3">All (${numOfHighCommission}) validator(s) nominated have 100% commision</td></tr>`;
+                        }
+                    }
+                    if(numOfHighCommission < nominators.targets.length && isHighCommission && !allMaxCommission) {
+                        someMaxCommission = true;
+                        balanceTable.innerHTML += `<tr class="error" id="error"><td colspan="3">Some (${numOfHighCommission}) validator(s) nominated have 100% commision</td></tr>`;
+                    }
+                    if (nominators.targets.length < 16) {
+                        maxNoms = false
+                        balanceTable.innerHTML += `<tr class="error" id="error"><td colspan="3">Nominate 16 validators for best chance at earning consistent rewards</td></tr>`;
+                        balanceTable.innerHTML += `<tr class="error" id="error"><td colspan="3">You currently have ${nominators.targets.length} validator(s) nominated</td></tr>`;
+
+                    }
+                    if(someMaxCommission) {
+                        balanceTable.innerHTML += `<tr class="issue"><td colspan="3">You may or may not earn rewards consistently due to current validators nominated (commission issue)</td></tr>`;
+                    }
+                    else if(!bondTooLow && !allMaxCommission && !someMaxCommission && maxNoms == true) {
+                        balanceTable.innerHTML += `<tr class="success"><td colspan="3">You should be earning rewards</td></tr>`;
+                    }
+                } catch(err) {
+                    console.error(err);
+                }
+            }
+
+            async function run() {
+                try {
+                    await checkBalance();
+                    if (isStaking) {
+                        checkNominations();
+                        toggleNominationsButton.disabled = false; 
+                    } else if (isStaking === null) {
+                        balanceTable.innerHTML += `<tr class="error"><td colspan="3">error, retry</td></tr>`;
+                    } else {
+                        toggleNominationsButton.classList.add("hidden");
+                    }
+                    
+                } catch(err) {
+                    console.error(err);
+                }
+            }
+            run();
+        }
+
+        function formatNumber(number) {
+            return Number(number).toFixed(3);
+        }
+    }
+    main();
+    </script>
+</body>
+</html>
